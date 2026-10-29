@@ -1,8 +1,5 @@
 ﻿using DotNetSolutionAnalyzer.GraphModelDefinitions;
 using DotNetSolutionAnalyzer.Models;
-using System;
-using System.Collections.Generic;
-using System.Text;
 using System.Text.Json;
 
 namespace DotNetSolutionAnalyzer.TransformerServices
@@ -11,7 +8,7 @@ namespace DotNetSolutionAnalyzer.TransformerServices
     {
         public static CodeGraph Transform(string jsonContent)
         {
-            var analysis = JsonSerializer.Deserialize<SolutionAnalysisModel>(jsonContent, new JsonSerializerOptions { PropertyNameCaseInsensitive = true })
+            var analysis = JsonSerializer.Deserialize<SolutionModel>(jsonContent, new JsonSerializerOptions { PropertyNameCaseInsensitive = true })
                            ?? throw new InvalidOperationException("Invalid JSON payload.");
 
             var graph = new CodeGraph();

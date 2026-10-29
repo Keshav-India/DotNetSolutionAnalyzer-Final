@@ -1,7 +1,5 @@
 using Microsoft.Build.Locator;
-
 namespace DotNetSolutionAnalyzer.Analysis;
-
 internal static class MsBuildRegistration
 {
     public static string Register()

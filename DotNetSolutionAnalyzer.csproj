@@ -17,6 +17,8 @@
 		<PackageReference Include="Microsoft.CodeAnalysis.CSharp.Workspaces" Version="5.9.0" />
 
 		<PackageReference Include="Microsoft.Extensions.Configuration.Json" Version="10.0.14" />
+		<PackageReference Include="System.Data.SqlClient" Version="4.8.6" />
+
 	</ItemGroup>
 	<ItemGroup>
 		<None Update="appsettings.json">

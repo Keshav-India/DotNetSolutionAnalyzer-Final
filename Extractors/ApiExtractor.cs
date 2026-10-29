@@ -4,50 +4,69 @@ using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 
 namespace DotNetSolutionAnalyzer.Extractors;
-
 internal sealed class ApiExtractor
 {
     private static readonly Dictionary<string, string> HttpAttributeMethods = new(StringComparer.OrdinalIgnoreCase)
     {
-        ["HttpGet"] = "GET", ["HttpPost"] = "POST", ["HttpPut"] = "PUT",
-        ["HttpDelete"] = "DELETE", ["HttpPatch"] = "PATCH", ["AcceptVerbs"] = "Multiple"
+        ["HttpGet"] = "GET",
+        ["HttpPost"] = "POST",
+        ["HttpPut"] = "PUT",
+        ["HttpDelete"] = "DELETE",
+        ["HttpPatch"] = "PATCH",
+        ["AcceptVerbs"] = "Multiple"
     };
 
     public List<ApiEndpointModel> Extract(ProjectModel project)
     {
         var results = new List<ApiEndpointModel>();
-        if (!Directory.Exists(project.ProjectDirectory)) return results;
+
+        if (!Directory.Exists(project.ProjectDirectory))
+            return results;
 
         foreach (var file in Directory.EnumerateFiles(project.ProjectDirectory, "*.cs", SearchOption.AllDirectories)
-                     .Where(p => !p.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase)
-                              && !p.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase)))
+                     .Where(p =>
+                         !p.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase)
+                         && !p.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase)))
         {
             SyntaxNode root;
-            try { root = CSharpSyntaxTree.ParseText(File.ReadAllText(file), path: file).GetRoot(); }
-            catch { continue; }
+            try
+            {
+                root = CSharpSyntaxTree.ParseText(File.ReadAllText(file), path: file).GetRoot();
+            }
+            catch
+            {
+                continue;
+            }
 
             foreach (var controller in root.DescendantNodes().OfType<ClassDeclarationSyntax>())
             {
                 var controllerAttrs = GetAttributes(controller.AttributeLists);
-                var isController = controller.Identifier.ValueText.EndsWith("Controller", StringComparison.OrdinalIgnoreCase)
-                                   || controllerAttrs.Any(a => a.StartsWith("ApiController", StringComparison.OrdinalIgnoreCase));
-                if (!isController) continue;
+                var isController =
+                    controller.Identifier.ValueText.EndsWith("Controller", StringComparison.OrdinalIgnoreCase)
+                    || controllerAttrs.Any(a => a.StartsWith("ApiController", StringComparison.OrdinalIgnoreCase));
+
+                if (!isController)
+                    continue;
 
                 foreach (var action in controller.Members.OfType<MethodDeclarationSyntax>())
                 {
                     var actionAttrs = GetAttributes(action.AttributeLists);
-                    var methods = actionAttrs.Select(a => a.Split('(')[0].Split('.').Last())
-                        .Where(HttpAttributeMethods.ContainsKey)
-                        .Select(a => HttpAttributeMethods[a]).Distinct().ToList();
 
-                    // ASP.NET Web API/MVC may use convention-based routes. Keep those actions too.
+                    var methods = actionAttrs
+                        .Select(a => a.Split('(')[0].Split('.').Last())
+                        .Where(HttpAttributeMethods.ContainsKey)
+                        .Select(a => HttpAttributeMethods[a])
+                        .Distinct()
+                        .ToList();
+
                     if (methods.Count == 0 && !action.Modifiers.Any(SyntaxKind.PublicKeyword))
                         continue;
 
                     var routes = controllerAttrs.Concat(actionAttrs)
-                        .Where(a => a.StartsWith("Route", StringComparison.OrdinalIgnoreCase) ||
-                                    a.StartsWith("RoutePrefix", StringComparison.OrdinalIgnoreCase))
-                        .Select(a => ExtractAttributeArgument(a))
+                        .Where(a =>
+                            a.StartsWith("Route", StringComparison.OrdinalIgnoreCase) ||
+                            a.StartsWith("RoutePrefix", StringComparison.OrdinalIgnoreCase))
+                        .Select(ExtractAttributeArgument)
                         .Where(s => !string.IsNullOrWhiteSpace(s))
                         .ToList();
 

@@ -3,7 +3,6 @@ using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.MSBuild;
 
 namespace DotNetSolutionAnalyzer.Extractors;
-
 internal sealed class SolutionExtractor
 {
     public async Task<SolutionModel> ExtractAsync(string solutionPath)

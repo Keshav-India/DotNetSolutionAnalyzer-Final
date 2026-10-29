@@ -1,0 +1,358 @@
+using DotNetSolutionAnalyzer.Models;
+using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
+
+namespace DotNetSolutionAnalyzer.Extractors;
+
+internal sealed class CodeExtractor
+{
+    public async Task<CodeModel> ExtractAsync(ProjectModel projectModel)
+    {
+        var result = new CodeModel();
+
+        if (string.IsNullOrWhiteSpace(projectModel.ProjectFilePath))
+            return result;
+
+        // Finds all C# files in the project directory.
+        var sourceFiles = Directory.Exists(projectModel.ProjectDirectory)
+            ? Directory.EnumerateFiles(
+                    projectModel.ProjectDirectory,
+                    "*.cs",
+                    SearchOption.AllDirectories)
+                .Where(p =>  // Excludes generated build output directories.
+
+                    !p.Contains(
+                        $"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}",
+                        StringComparison.OrdinalIgnoreCase)
+                    &&
+                    !p.Contains(
+                        $"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}",
+                        StringComparison.OrdinalIgnoreCase))
+                .ToList()
+            : [];   // Uses an empty list when the directory does not exist.
+
+
+        // Parse files first so interfaces declared in the same project
+        // can be identified before extracting inheritance.
+        // Stores each file path, syntax tree, and syntax root.
+        var parsedFiles = new List<(string File, SyntaxTree Tree, SyntaxNode Root)>();
+
+        foreach (var file in sourceFiles)
+        {
+            try
+            {
+                var source = await File.ReadAllTextAsync(file); // Reads the source file asynchronously.
+                var tree = CSharpSyntaxTree.ParseText(source, path: file);// Parses the source text into a C# syntax tree.
+                var root = await tree.GetRootAsync();// Gets the root syntax node from the tree.
+
+                parsedFiles.Add((file, tree, root));// Saves the parsed file information for later processing.
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine(
+                    $"Cannot read or parse '{file}': {ex.Message}");
+            }
+        }
+
+        // Collect declared interface names from the project.
+        // Finds all interfaces declared in the project.
+        var declaredInterfaces = parsedFiles
+            .SelectMany(f => f.Root.DescendantNodes()
+                .OfType<InterfaceDeclarationSyntax>())
+            .Select(i => i.Identifier.ValueText)  // Extracts each interface name.
+            .ToHashSet(StringComparer.Ordinal);
+
+        // Processes every successfully parsed file.
+        foreach (var (file, tree, root) in parsedFiles)
+        {
+            foreach (var type in root.DescendantNodes()
+                         .OfType<BaseTypeDeclarationSyntax>())
+            {
+                var typeName = type.Identifier.ValueText;
+
+                var baseList = type.BaseList?.Types
+                    .Select(t => t.Type.ToString())
+                    .ToList() ?? [];
+
+                // Converts the syntax node type into a readable type category.
+                var kind = type switch
+                {
+                    ClassDeclarationSyntax => "Class",
+                    InterfaceDeclarationSyntax => "Interface",
+                    StructDeclarationSyntax => "Struct",
+                    EnumDeclarationSyntax => "Enum",
+                    RecordDeclarationSyntax => "Record",
+                    _ => type.Kind().ToString()
+                };
+
+                // Collects the modifiers applied to the type.
+                var modifiers = GetModifiers(type)
+                    .Select(m => m.Text)
+                    .ToHashSet(StringComparer.Ordinal);
+
+                // Stores the explicitly declared base class.
+                string? baseType = null;
+                // Stores implemented or inherited interfaces.
+                var interfaces = new List<string>();
+                // Processes each declared base type.
+                foreach (var baseName in baseList)
+                {	
+                    // Interfaces can inherit only from other interfaces.
+                    if (kind == "Interface")
+                    {
+                        // All base types of an interface are interfaces. 	
+                        // Adds the inherited interface.
+                        interfaces.Add(baseName);
+                    }
+                    else if (kind == "Class" || kind == "Record") // Classes and records can have a base class and interfaces.
+                    {
+                        if (IsInterfaceName(baseName, declaredInterfaces))
+                        {
+                            interfaces.Add(baseName);
+                        }
+                        else if (baseType is null)
+                        {
+                            // A class or record can have at most one
+                            // explicitly declared base class.
+                            baseType = baseName;
+                        }
+                        else
+                        {
+                            // Fallback for additional interface entries.
+                            interfaces.Add(baseName);
+                        }
+                    }
+                    else if (kind == "Struct")
+                    {
+                        // Structs implement interfaces, not base classes.
+                        interfaces.Add(baseName);
+                    }
+                }
+
+                // Adds the extracted type information to the result.
+                result.Types.Add(new TypeModel
+                {
+                    // Gets the namespace containing the type.
+                    Namespace = GetNamespace(type),
+                    // Stores the type name.
+                    Name = typeName,
+                    // Stores the type category.
+                    Kind = kind,
+                    // Stores the source file path.
+                    FilePath = file,
+                    // Stores the one-based source line number.
+                    Line = tree.GetLineSpan(type.Span)
+                        .StartLinePosition.Line + 1,
+                    // Stores the base class name, if any.
+                    BaseType = baseType,
+                    // Stores the implemented interfaces.
+                    Interfaces = interfaces,
+                    // Indicates whether the type is abstract.
+                    IsAbstract = modifiers.Contains("abstract"),
+                    // Indicates whether the type is static.
+                    IsStatic = modifiers.Contains("static"),
+                    // Extracts all type attributes.
+                    Attributes = type.AttributeLists
+                        // Gets every attribute from every attribute list.
+                        .SelectMany(a => a.Attributes)
+                        // Converts attributes to text.
+                        .Select(a => a.Name.ToString())
+                        // Removes duplicate attributes.
+                        .Distinct()
+                        // Converts the attributes to a list.
+                        .ToList()
+                });
+            }
+
+            // Finds every method declaration in the source file.
+            foreach (var method in root.DescendantNodes()
+                         .OfType<MethodDeclarationSyntax>())
+            {
+                // Finds the type that directly contains the method.
+                var containingType = method.Parent is TypeDeclarationSyntax parent
+                    // Uses the containing type name.
+                    ? parent.Identifier.ValueText
+                    // Uses a fallback when no containing type is found.
+                    : "Unknown";
+
+                // Adds the extracted method information to the result.
+                result.Methods.Add(new MethodModel
+                {
+                    // Stores the containing type name.
+                    ContainingType = containingType,
+                    // Stores the method name.
+                    Name = method.Identifier.ValueText,
+                    // Stores the return type text.
+                    ReturnType = method.ReturnType.ToString(),
+                    // Extracts public, private, protected, and internal modifiers.
+                    Accessibility = string.Join(
+                        " ",
+                        method.Modifiers.Where(m =>
+                            // Includes public methods.
+                            m.IsKind(SyntaxKind.PublicKeyword) ||
+                            // Includes private methods.
+                            m.IsKind(SyntaxKind.PrivateKeyword) ||
+                            // Includes protected methods.
+                            m.IsKind(SyntaxKind.ProtectedKeyword) ||
+                            // Includes internal methods.
+                            m.IsKind(SyntaxKind.InternalKeyword))
+                        // Converts accessibility modifiers to text.
+                        .Select(m => m.Text)),
+                    // Stores the source file path.
+                    FilePath = file,
+                    // Stores the one-based method line number.
+                    Line = tree.GetLineSpan(method.Span)
+                        .StartLinePosition.Line + 1,
+                    // Indicates whether the method is static.
+                    IsStatic = method.Modifiers
+                        .Any(SyntaxKind.StaticKeyword),
+                    // Indicates whether the method is abstract.
+                    IsAbstract = method.Modifiers
+                        .Any(SyntaxKind.AbstractKeyword),
+                    // Indicates whether the method overrides a base method.
+                    IsOverride = method.Modifiers
+                        .Any(SyntaxKind.OverrideKeyword),
+                    // Extracts method parameter types and names.
+                    Parameters = method.ParameterList.Parameters
+                        .Select(p =>
+                            // Uses "var" when a parameter type is unavailable.
+                            $"{p.Type?.ToString() ?? "var"} {p.Identifier.ValueText}")
+                        // Converts parameters to a list.
+                        .ToList(),
+                    // Extracts all method attributes.
+                    Attributes = method.AttributeLists
+                        // Gets every attribute from every attribute list.
+                        .SelectMany(a => a.Attributes)
+                        // Converts attributes to text.
+                        .Select(a => a.Name.ToString())
+                        // Removes duplicate attributes.
+                        .Distinct()
+                        // Converts the attributes to a list.
+                        .ToList()
+                });
+            }
+
+            // Finds every method invocation in the source file.
+            foreach (var invocation in root.DescendantNodes()
+                         .OfType<InvocationExpressionSyntax>())
+            {
+                // Finds the method containing the invocation.
+                var callerMethod = invocation.Ancestors()
+                    .OfType<MethodDeclarationSyntax>()
+                    .FirstOrDefault();
+
+                // Adds the method call information to the result.
+                result.Calls.Add(new MethodCallModel
+                {
+                    // Uses the containing method name or a fallback value.
+                    Caller = callerMethod?.Identifier.ValueText
+                             ?? "<field-or-initializer>",
+                    // Stores the invoked expression text.
+                    CalledMethod = invocation.Expression.ToString(),
+                    // Stores the source file path.
+                    FilePath = file,
+                    // Stores the one-based invocation line number.
+                    Line = tree.GetLineSpan(invocation.Span)
+                        .StartLinePosition.Line + 1
+                });
+
+                // Stores the invoked expression for registration detection.
+                var expression = invocation.Expression.ToString();
+
+                // Checks whether the invocation looks like a dependency registration.
+                if (expression.Contains("AddScoped", StringComparison.Ordinal) ||
+                    expression.Contains("AddTransient", StringComparison.Ordinal) ||
+                    expression.Contains("AddSingleton", StringComparison.Ordinal) ||
+                    expression.Contains("RegisterType", StringComparison.Ordinal) ||
+                    expression.Contains("Register", StringComparison.Ordinal))
+                {
+                    // Extracts all invocation arguments as text.
+                    var arguments = invocation.ArgumentList.Arguments
+                        .Select(a => a.ToString())
+                        .ToList();
+
+                    // Adds the dependency registration to the result.
+                    result.DependencyRegistrations.Add(
+                        new DependencyRegistrationModel
+                        {
+                            // Stores the registration method expression.
+                            RegistrationMethod = expression,
+                            // Uses the first argument as the service type.
+                            ServiceType = arguments.ElementAtOrDefault(0),
+                            // Uses the second argument as the implementation type.
+                            ImplementationType = arguments.ElementAtOrDefault(1),
+                            // Stores the source file path.
+                            FilePath = file,
+                            // Stores the one-based registration line number.
+                            Line = tree.GetLineSpan(invocation.Span)
+                                .StartLinePosition.Line + 1
+                        });
+                }
+            }
+        }
+
+        return result;
+    }
+
+    // Determines whether a type name represents an interface.
+    private static bool IsInterfaceName(
+        // Receives the type name to inspect.
+        string typeName,
+        // Receives interfaces declared in the current project.
+        HashSet<string> declaredInterfaces)
+    {
+        // Removes generic arguments and namespace qualification.
+        var simpleName = typeName
+            // Removes everything after the first generic argument.
+            .Split('<')[0]
+            // Splits a namespace-qualified name.
+            .Split('.')
+            // Gets the final name segment.
+            .Last()
+            // Removes a nullable suffix.
+            .TrimEnd('?');
+
+        // Checks whether the interface is declared in this project.
+        if (declaredInterfaces.Contains(simpleName))
+            return true;
+
+        // Uses the conventional "IName" interface naming pattern.
+        return simpleName.Length > 1
+               // Requires the first character to be uppercase I.
+               && simpleName[0] == 'I'
+               // Requires the second character to be uppercase.
+               && char.IsUpper(simpleName[1]);
+    }
+
+    // Gets the namespace containing a syntax node.
+    private static string GetNamespace(SyntaxNode node) =>
+        // Joins all containing namespace names.
+        string.Join(
+            // Uses a period between namespace segments.
+            ".",
+            // Finds all containing namespace declarations.
+            node.Ancestors()
+                .OfType<BaseNamespaceDeclarationSyntax>()
+                // Reverses them to get outer-to-inner order.
+                .Reverse()
+                // Converts namespace names to text.
+                .Select(n => n.Name.ToString()));
+
+    // Gets the modifiers supported by the specified type declaration.
+    private static SyntaxTokenList GetModifiers(
+        // Receives the type declaration.
+        BaseTypeDeclarationSyntax type) => type switch
+        {
+            // Gets modifiers from a class declaration.
+            ClassDeclarationSyntax n => n.Modifiers,
+            // Gets modifiers from an interface declaration.
+            InterfaceDeclarationSyntax n => n.Modifiers,
+            // Gets modifiers from a struct declaration.
+            StructDeclarationSyntax n => n.Modifiers,
+            // Gets modifiers from a record declaration.
+            RecordDeclarationSyntax n => n.Modifiers,
+            // Returns an empty modifier list for unsupported declarations.
+            _ => default
+        };
+}
